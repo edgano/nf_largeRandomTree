@@ -31,242 +31,60 @@
  * defaults parameter definitions
  */
 
-// input sequences to align in fasta format
-params.seqs = "$baseDir/data/*.fa"
-params.refs = "$baseDir/data/*.ref"
-
-// input guide trees in Newick format. Or `false` to generate trees
-//params.trees = "/users/cn/egarriga/datasets/homfam/trees/*.{FAMSA,CLUSTALO,CLUSTALO-RANDOM,MAFFT_PARTTREE}.dnd"
-params.trees =""
-
-// generate regressive alignments ?
-params.regressive_align = true
-
-// create progressive alignments ?
-params.progressive_align = true
-
-// evaluate alignments ?
-params.evaluate = true
-
-//aligner and tree generation
-tree_method = "FAMSA"
-align_method = "FAMSA"
-
-// bucket sizes for regressive algorithm
-params.buckets= '1000'
+ // input sequences to align in fasta format
+params.seqs = "/users/cn/lmansouri/PROJECTS/BENCHFAM_28.0_2018/BENCHFAM_FOR_REGRESSIVE/FILES_FOR_REGRESSIVE/combined_seqs/PF13193.fa"
 
 // output directory
-//defined in nextflow.config
+params.output = "${baseDir}/results"
 
 log.info """\
-         F  A  M  S  A    P  i  p  e  l  i  n  e  ~  version 0.1"
+         PIPELINE  ~  version 0.1"
          ======================================="
          Input sequences (FASTA)                        : ${params.seqs}
-         Input references (Aligned FASTA)               : ${params.refs}
-         Input trees (NEWICK)                           : ${params.trees}
-         Alignment methods                              : ${align_method}
-         Tree methods                                   : ${tree_method}
-         Generate progressive alignments                : ${params.progressive_align}
-         Generate regressive alignments (DPA)           : ${params.regressive_align}
-         Bucket Sizes for regressive alignments         : ${params.buckets}
-         Perform evaluation? Requires reference         : ${params.evaluate}
-         Output directory (DIRECTORY)                   : ${params.outdir}
+         Output directory (DIRECTORY)                   : ${params.output}
          """
          .stripIndent()
-
 
 // Channels containing sequences
 if ( params.seqs ) {
   Channel
   .fromPath(params.seqs)
   .map { item -> [ item.baseName, item] }
+  .view()
   .into { seqsCh; seqs2 }
 }
 
-if ( params.refs ) {
-  Channel
-  .fromPath(params.refs)
-  .map { item -> [ item.baseName, item] }
-  .set { refs }
-}
+process generateTree {
+    conda './environment.yml'
 
-// Channels for user provided trees or empty channel if trees are to be generated [OPTIONAL]
-if ( params.trees ) {
-  Channel
-    .fromPath(params.trees)
-    .map { item -> [ item.baseName.tokenize('.')[0], item.baseName.tokenize('.')[1], item] }
-    .set { trees }
-}
-else { 
-  Channel
-    .empty()
-    .set { trees }
-}
-
-/*
- * GENERATE GUIDE TREES USING MEHTODS DEFINED WITH "--tree_method"
- *
- * NOTE: THIS IS ONLY IF GUIDE TREES ARE NOT PROVIDED BY THE USER
- * BY USING THE `--trees` PARAMETER
- */
-
-process generate_trees {
-    tag "${id}.${tree_method}"
-    publishDir "${params.outdir}/guide_trees", mode: 'copy', overwrite: true
-   
-    input:
-    set val(id), \
-         file(seqs) \
-         from seqsCh
-
-   output:
-     set val(id), \
-       val(tree_method), \
-       file("${id}.${tree_method}.dnd") \
-       into treesGenerated
-
-   when:
-     !params.trees
-
-   script:
-   """
-   famsa -gt_export ${id}.${tree_method}.dnd ${seqs} ${id}.aln
-   """
-}
-
-treesGenerated
-  .mix ( trees )
-  .combine ( seqs2, by:0 )
-  .into {seqsAndTreesForRegressiveAlignment; seqsAndTreesForProgressiveAlignment }
-
-
-process regressive_alignment {
     tag "${id}"
-    publishDir "${params.outdir}/alignments", mode: 'copy', overwrite: true
+    publishDir "${params.output}/trees", mode: 'copy', overwrite: true
 
     input:
-        set val(id), \
-        val(tree_method), \
-        file(guide_tree), \
-        file(seqs) \
-        from seqsAndTreesForRegressiveAlignment
-
-      each bucket_size from params.buckets.tokenize(',')
-
-    when:
-      params.regressive_align
+      set val(id), file(seqs) from seqsCh
 
     output:
-      set val(id), \
-        val("${align_method}"), \
-        val(tree_method), \
-        val("reg_align"), \
-        val(bucket_size), \
-        file("${id}.reg_align.${bucket_size}.${align_method}.with.${tree_method}.tree.aln") \
-        into regressiveOut
+     set val(id), file("${id}.rndTree.dnd") into reformatSeqsOut
 
     script:
     """
-        t_coffee -reg -reg_method famsa_msa \
-         -reg_tree ${guide_tree} \
-         -seq ${seqs} \
-         -reg_nseq ${bucket_size} \
-         -reg_homoplasy \
-         -outfile ${id}.reg_align.${bucket_size}.${align_method}.with.${tree_method}.tree.aln
-    """
-}
+    #!/usr/bin/env Rscript
+    fastaFile <- seqinr::read.fasta(file = "$seqs")
 
-process progressive_alignment {
-    tag "${id}"
-    publishDir "${params.outdir}/alignments", mode: 'copy', overwrite: true
+    #how many fasta sequences
+    length(fastaFile)
 
-    input:
-        set val(id), \
-        val(tree_method), \
-        file(guide_tree), \
-        file(seqs) \
-        from seqsAndTreesForProgressiveAlignment
+    #get the seqs IDs
+    seqNames<-seqinr::getName(fastaFile)
 
-    when:
-      params.progressive_align
+    #define numbers of leave
+    n <- length(fastaFile)
 
-    output:
-      set val(id), \
-        val("${align_method}"), \
-        val(tree_method), \
-        val("prog_align"), \
-        val("NA"), \
-        file("${id}.prog_align.NA.${align_method}.with.${tree_method}.tree.aln") \
-        into progressiveOut
+    #produce the tree
+    rt<-ape::rmtree(1, n, rooted = TRUE, tip.label = seqNames, br = runif)
 
-    script:
-    """
-      famsa -gt_import ${guide_tree} ${seqs} ${id}.prog_align.NA.${align_method}.with.${tree_method}.tree.aln
-    """
-}
-
-progressiveOut
-  .mix ( regressiveOut )
-  .set { all_alignments }
-
-refs
-  .cross (all_alignments )
-  .map { it -> [it[0][0], it[1][1], it[1][2], it[1][3], it[1][4], it[1][5], it[0][1]] }
-  .set { toEvaluate }
-
-process evaluation {
-    tag "${id}.${align_method}.${tree_method}.${align_type}.${bucket_size}"
-    publishDir "${params.outdir}/individual_scores", mode: 'copy', overwrite: true
-
-    input:
-      set val(id), \
-          val(align_method), \
-          val(tree_method), \
-          val(align_type), \
-          val(bucket_size), \
-          file(test_alignment), \
-          file(ref_alignment) \
-          from toEvaluate
-
-    output:
-      set val(id), \
-          val(tree_method), \
-          val(align_method), \
-          val(align_type), \
-          val(bucket_size), \
-          file("*.sp"), \
-          file("*.tc"), \
-          file("*.col") \
-          into scores
-
-    when:
-      params.evaluate
-
-     script:
-     """
-       t_coffee -other_pg aln_compare \
-             -al1 ${ref_alignment} \
-             -al2 ${test_alignment} \
-            -compare_mode sp \
-            | grep -v "seq1" | grep -v '*' | \
-            awk '{ print \$4}' ORS="\t" \
-            > "${id}.${align_type}.${bucket_size}.${align_method}.with.${tree_method}.tree.sp"
-
-       t_coffee -other_pg aln_compare \
-             -al1 ${ref_alignment} \
-             -al2 ${test_alignment} \
-            -compare_mode tc \
-            | grep -v "seq1" | grep -v '*' | \
-            awk '{ print \$4}' ORS="\t" \
-            > "${id}.${align_type}.${bucket_size}.${align_method}.with.${tree_method}.tree.tc"
-
-       t_coffee -other_pg aln_compare \
-             -al1 ${ref_alignment} \
-             -al2 ${test_alignment} \
-            -compare_mode column \
-            | grep -v "seq1" | grep -v '*' | \
-              awk '{ print \$4}' ORS="\t" \
-            > "${id}.${align_type}.${bucket_size}.${align_method}.with.${tree_method}.tree.col"
+    #convert & save to newick
+    ape::write.tree(rt, file = "${id}.rndTree.dnd", append = FALSE,digits = 2, tree.names = FALSE)
 
     """
 }
